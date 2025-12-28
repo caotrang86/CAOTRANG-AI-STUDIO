@@ -12,9 +12,10 @@
     "noEmit": true,
     "jsx": "react-jsx",
     "strict": true,
-    "unusedLocals": true,
-    "unusedParameters": true,
-    "noFallthroughCasesInSwitch": true
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "types": ["node"]
   },
   "include": ["src", "netlify/functions"],
   "references": [{ "path": "./tsconfig.node.json" }]
