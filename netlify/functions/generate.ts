@@ -1,145 +1,65 @@
+
 import { GoogleGenAI } from "@google/genai";
+
+interface GenerationOptions {
+  aspectRatio: string;
+  resolution: string;
+  style: string;
+}
 
 interface HandlerEvent {
   body: string;
   httpMethod: string;
 }
 
-interface HandlerResponse {
-  statusCode: number;
-  body: string;
-  headers?: { [key: string]: string };
-}
+const STYLES_MAP: Record<string, string> = {
+  photorealistic: 'photorealistic, 8k, highly detailed, professional photography, raw photo, realistic textures',
+  anime: 'anime style, vivid colors, expressive features, clean lines, cell shaded',
+  chibi: 'chibi style, cute, small proportions, simplified details, toy-like aesthetic',
+  '3d-render': '3d render, high quality, octane render, cinematic lighting, material realism',
+  painting: 'artistic painting, visible brushstrokes, canvas texture, oil painting style',
+  flat: 'flat illustration, minimalist, vector art, graphic design style'
+};
 
-export const handler = async (event: HandlerEvent): Promise<HandlerResponse> => {
+export const handler = async (event: HandlerEvent) => {
   const headers = {
     'Access-Control-Allow-Origin': '*',
     'Access-Control-Allow-Headers': 'Content-Type',
     'Content-Type': 'application/json'
   };
 
-  if (event.httpMethod === 'OPTIONS') {
-    return { statusCode: 200, body: '', headers };
-  }
-
-  if (event.httpMethod !== 'POST') {
-    return {
-      statusCode: 405,
-      body: JSON.stringify({ success: false, error: 'Method Not Allowed' }),
-      headers
-    };
-  }
+  if (event.httpMethod === 'OPTIONS') return { statusCode: 200, body: '', headers };
+  if (event.httpMethod !== 'POST') return { statusCode: 405, body: 'Method Not Allowed', headers };
 
   try {
-    // Initialize GoogleGenAI with process.env.API_KEY
-    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY || '' });
+    const { feature_id, prompt, face_ref, source_img, options } = JSON.parse(event.body || '{}') as {
+      feature_id: string;
+      prompt: string;
+      face_ref?: string;
+      source_img?: string;
+      options: GenerationOptions;
+    };
 
-    const { feature_id, prompt, image_base64 } = JSON.parse(event.body || '{}');
-
-    // Determine model and task based on feature_id
-    // Analysis (image-to-text) uses gemini-3-flash-preview
-    // Image Generation/Editing uses gemini-2.5-flash-image
-    let model = 'gemini-2.5-flash-image';
-    let isAnalysis = false;
-
-    if (feature_id === 'analyze') {
-      model = 'gemini-3-flash-preview';
-      isAnalysis = true;
-    }
-
-    // Construct contents
+    let modelName = 'gemini-2.5-flash-image';
+    let systemInstruction = '';
     const parts: any[] = [];
 
-    // Handle image input (Data URL from frontend)
-    if (image_base64) {
-       const matches = image_base64.match(/^data:([a-zA-Z0-9]+\/[a-zA-Z0-9-.+]+);base64,(.+)$/);
-       if (matches) {
-         parts.push({
-           inlineData: {
-             mimeType: matches[1],
-             data: matches[2]
-           }
-         });
-       }
-    }
-
-    // Handle text prompt
-    if (prompt) {
-      parts.push({ text: prompt });
-    } else if (isAnalysis && parts.length > 0) {
-      // Provide default prompt for analysis if missing
-      parts.push({ text: "Describe this image in detail." });
-    }
-
-    if (parts.length === 0) {
-      throw new Error("No valid input provided (prompt or image)");
-    }
-
-    // Call generateContent for both text and image tasks
-    const response = await ai.models.generateContent({
-      model: model,
-      contents: { parts }
-    });
-
-    // Process Response
-    let responseData: any = {};
-
-    if (isAnalysis) {
-       // Text response for analysis
-       responseData = {
-         analysis_text: response.text
-       };
+    // 1. Phân tích loại task
+    if (feature_id === 'analyze') {
+      modelName = 'gemini-3-flash-preview';
+      parts.push({ text: prompt || "Phân tích và mô tả chi tiết hình ảnh này." });
+      if (source_img) {
+        const matches = source_img.match(/^data:([^;]+);base64,(.+)$/);
+        if (matches) parts.push({ inlineData: { mimeType: matches[1], data: matches[2] } });
+      }
     } else {
-       // Image response for generation/editing
-       // Iterate through parts to find the image part
-       let imageUrl = null;
-       const candidates = response.candidates;
-       if (candidates) {
-         for (const candidate of candidates) {
-           if (candidate.content && candidate.content.parts) {
-             for (const part of candidate.content.parts) {
-               if (part.inlineData) {
-                 // Convert inlineData back to Data URL for frontend
-                 imageUrl = `data:${part.inlineData.mimeType};base64,${part.inlineData.data}`;
-                 break;
-               }
-             }
-           }
-           if (imageUrl) break;
-         }
-       }
-       
-       if (!imageUrl) {
-          // If no image generated, return text as error message or fallback
-          throw new Error(response.text || "Failed to generate image.");
-       }
-       
-       responseData = {
-         image_url: imageUrl
-       };
-    }
-
-    return {
-      statusCode: 200,
-      body: JSON.stringify({
-        success: true,
-        data: {
-          request_id: Date.now().toString(),
-          ...responseData
-        }
-      }),
-      headers
-    };
-
-  } catch (error: any) {
-    console.error("Backend Error:", error);
-    return {
-      statusCode: 500,
-      body: JSON.stringify({
-        success: false,
-        error: error.message || "Internal Server Error"
-      }),
-      headers
-    };
-  }
-};
+      // Generation logic
+      const stylePrompt = STYLES_MAP[options.style] || '';
+      
+      // Xây dựng System Instruction để giữ gương mặt (Face Consistency)
+      if (face_ref) {
+        systemInstruction = `
+          Bạn là một chuyên gia tạo ảnh AI. 
+          QUAN TRỌNG NHẤT: Bức ảnh đầu tiên được cung cấp là gương mặt tham chiếu của người dùng.
+          Nhiệm vụ: Tạo ra một hình ảnh mới dựa trên mô tả, nhưng PHẢI GIỮ NGUYÊN 100% đặc điểm nhận dạng gương mặt từ ảnh tham chiếu (mắt, mũi, miệng
