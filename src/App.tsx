@@ -1,9 +1,9 @@
 
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { 
   Upload, Palette, Image as ImageIcon, 
-  Library, Wand2, ShoppingBag, Flag, ScanEye, 
-  Zap, Shirt, User, Box, Building2, Baby, 
+  Wand2, ShoppingBag, Flag, ScanEye, 
+  Shirt, User, Box, Building2, Baby, 
   History, Sun, Sparkles, PaintBucket, Settings, X, Loader2, Download, Copy, Search, RefreshCw, Edit3, ArrowLeftRight
 } from 'lucide-react';
 import type { Feature, HistoryItem, ApiResponse, GenerationOptions, PromptSample } from './types';
