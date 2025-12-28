@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect } from 'react';
 import { 
   Upload, Palette, Image as ImageIcon, 
   Library, Wand2, ShoppingBag, Flag, ScanEye, 
@@ -147,7 +147,7 @@ function App() {
   };
 
   // --- Styles ---
-  const accentColor = theme === THEMES.BLUE ? 'cyan' : 'lime';
+  // accentColor removed as it was unused
   const accentText = theme === THEMES.BLUE ? 'text-cyan-400' : 'text-lime-400';
   const accentBorder = theme === THEMES.BLUE ? 'border-cyan-500' : 'border-lime-500';
   const accentBg = theme === THEMES.BLUE ? 'bg-cyan-500' : 'bg-lime-500';
