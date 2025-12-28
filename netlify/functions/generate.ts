@@ -28,12 +28,36 @@ export const handler = async (event: HandlerEvent) => {
     'Content-Type': 'application/json'
   };
 
-  if (event.httpMethod === 'OPTIONS') return { statusCode: 200, body: '', headers };
-  if (event.httpMethod !== 'POST') return { statusCode: 405, body: 'Method Not Allowed', headers };
+  // Handle CORS preflight
+  if (event.httpMethod === 'OPTIONS') {
+    return { statusCode: 200, body: '', headers };
+  }
+
+  if (event.httpMethod !== 'POST') {
+    return { statusCode: 405, body: JSON.stringify({ error: 'Method Not Allowed' }), headers };
+  }
 
   try {
-    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY || '' });
-    const { feature_id, prompt, face_ref, source_img, options } = JSON.parse(event.body || '{}') as {
+    const apiKey = process.env.GEMINI_API_KEY || process.env.API_KEY;
+    if (!apiKey) {
+      return { 
+        statusCode: 500, 
+        headers, 
+        body: JSON.stringify({ success: false, error: 'Chưa cấu hình API Key trên server.' }) 
+      };
+    }
+
+    const ai = new GoogleGenAI({ apiKey });
+    
+    // Parse body safely
+    let bodyData;
+    try {
+      bodyData = JSON.parse(event.body || '{}');
+    } catch (e) {
+      return { statusCode: 400, headers, body: JSON.stringify({ success: false, error: 'Invalid JSON body' }) };
+    }
+
+    const { feature_id, prompt, face_ref, source_img, options } = bodyData as {
       feature_id: string;
       prompt: string;
       face_ref?: string;
@@ -41,25 +65,130 @@ export const handler = async (event: HandlerEvent) => {
       options: GenerationOptions;
     };
 
-    let modelName = 'gemini-2.5-flash-image';
-    let systemInstruction = '';
-    const parts: any[] = [];
+    let resultData: any = {};
 
-    // 1. Phân tích loại task
+    // --- CASE 1: PHÂN TÍCH ẢNH (Image Analysis) ---
     if (feature_id === 'analyze') {
-      modelName = 'gemini-3-flash-preview';
-      parts.push({ text: prompt || "Phân tích và mô tả chi tiết hình ảnh này." });
+      const parts: any[] = [];
+      
+      // Nếu có ảnh upload lên để phân tích
       if (source_img) {
         const matches = source_img.match(/^data:([^;]+);base64,(.+)$/);
-        if (matches) parts.push({ inlineData: { mimeType: matches[1], data: matches[2] } });
+        if (matches) {
+           parts.push({ inlineData: { mimeType: matches[1], data: matches[2] } });
+        }
+      } else if (face_ref) {
+         // Fallback nếu user up nhầm vào ô face ref
+         const matches = face_ref.match(/^data:([^;]+);base64,(.+)$/);
+         if (matches) {
+            parts.push({ inlineData: { mimeType: matches[1], data: matches[2] } });
+         }
       }
-    } else {
-      // Generation logic
-      const stylePrompt = STYLES_MAP[options.style] || '';
+
+      parts.push({ text: prompt ? `Phân tích chi tiết và trả lời câu hỏi sau bằng tiếng Việt: ${prompt}` : "Mô tả chi tiết nội dung hình ảnh này bằng tiếng Việt." });
+
+      const response = await ai.models.generateContent({
+        model: 'gemini-2.5-flash-latest',
+        contents: { parts },
+      });
       
-      // Xây dựng System Instruction để giữ gương mặt (Face Consistency)
+      resultData = { analysis_text: response.text };
+
+    } 
+    // --- CASE 2: TẠO ẢNH / EDIT ẢNH (Image Generation) ---
+    else {
+      const parts: any[] = [];
+      let finalPrompt = prompt;
+      
+      // Ghép Style
+      const stylePrompt = STYLES_MAP[options?.style] || '';
+      if (stylePrompt) {
+        finalPrompt += `, style: ${stylePrompt}`;
+      }
+      
+      // Ghép Aspect Ratio instructions vào prompt (phòng khi config không support tốt)
+      finalPrompt += `, aspect ratio ${options?.aspectRatio || '1:1'}, high resolution ${options?.resolution || '1024x1024'}`;
+
+      // Xử lý ảnh đầu vào
+      // Ưu tiên Face Ref cho các task cần giữ mặt
       if (face_ref) {
-        systemInstruction = `
-          Bạn là một chuyên gia tạo ảnh AI. 
-          QUAN TRỌNG NHẤT: Bức ảnh đầu tiên được cung cấp là gương mặt tham chiếu của người dùng.
-          Nhiệm vụ: Tạo ra một hình ảnh mới dựa trên mô tả, nhưng PHẢI GIỮ NGUYÊN 100% đặc điểm nhận dạng gương mặt từ ảnh tham chiếu (mắt, mũi, miệng
+          const matches = face_ref.match(/^data:([^;]+);base64,(.+)$/);
+          if (matches) {
+             parts.push({ inlineData: { mimeType: matches[1], data: matches[2] } });
+             // Thêm chỉ dẫn mạnh mẽ vào prompt để giữ mặt
+             finalPrompt = `(Input Image contains the REFERENCE FACE). Task: Create a new image based on the prompt: "${finalPrompt}". CRITICAL: You MUST preserve the facial identity, facial features, and skin tone of the person in the input image exactly. Blend the face naturally into the new context/outfit.`;
+          }
+      } else if (source_img) {
+          // Các task img2img thông thường (không nhấn mạnh giữ mặt)
+          const matches = source_img.match(/^data:([^;]+);base64,(.+)$/);
+          if (matches) {
+             parts.push({ inlineData: { mimeType: matches[1], data: matches[2] } });
+             finalPrompt = `(Input Image provided). Modify this image based on prompt: "${finalPrompt}".`;
+          }
+      }
+
+      parts.push({ text: finalPrompt });
+
+      // Cấu hình Image Generation
+      // Model `gemini-2.5-flash-image` là lựa chọn tốt cho tốc độ và chất lượng general
+      // Model `gemini-3-pro-image-preview` nếu cần chất lượng rất cao (nhưng chậm hơn)
+      
+      // Map aspect ratio sang format config (nếu model support)
+      // Lưu ý: SDK google/genai dùng `aspectRatio` string như "1:1", "16:9"
+      const imageConfig = {
+         aspectRatio: options?.aspectRatio || '1:1',
+      };
+
+      try {
+        const response = await ai.models.generateContent({
+          model: 'gemini-2.5-flash-image',
+          contents: { parts },
+          config: {
+            // @ts-ignore - SDK typings might lag behind param support
+            imageConfig: imageConfig
+          }
+        });
+
+        // Trích xuất ảnh từ response
+        let imageBase64 = '';
+        if (response.candidates && response.candidates[0].content && response.candidates[0].content.parts) {
+           for (const part of response.candidates[0].content.parts) {
+              if (part.inlineData && part.inlineData.data) {
+                  imageBase64 = `data:${part.inlineData.mimeType || 'image/png'};base64,${part.inlineData.data}`;
+                  break;
+              }
+           }
+        }
+
+        if (!imageBase64) {
+             // Nếu không có ảnh, có thể model từ chối hoặc trả về text lỗi
+             const textPart = response.text;
+             throw new Error(textPart || "AI không trả về hình ảnh. Có thể prompt vi phạm chính sách an toàn.");
+        }
+
+        resultData = { image_base64: imageBase64 };
+
+      } catch (genError: any) {
+         console.error("GenAI Error:", genError);
+         throw new Error(`Lỗi tạo ảnh: ${genError.message}`);
+      }
+    }
+
+    return {
+      statusCode: 200,
+      headers,
+      body: JSON.stringify({ success: true, data: resultData })
+    };
+
+  } catch (error: any) {
+    console.error("Handler Error:", error);
+    return {
+      statusCode: 500,
+      headers,
+      body: JSON.stringify({ 
+        success: false, 
+        error: error.message || "Đã có lỗi xảy ra phía server." 
+      })
+    };
+  }
+};
